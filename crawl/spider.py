@@ -1,29 +1,5 @@
 from scrapy import Spider, Selector
 from scrapy.http import Response
-from selenium import webdriver
-from selenium.webdriver import FirefoxProfile
-from selenium.webdriver.firefox.options import Options
-
-
-class Firefox:
-    def __init__(self):
-        options = Options()
-        options.headless = True
-        firefox_profile = self._new_profile()
-        self.driver = webdriver.Firefox(firefox_profile, options=options)
-
-    def __enter__(self):
-        return self.driver
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.driver.close()
-
-    def _new_profile(self):
-        profile = FirefoxProfile()
-        profile.set_preference('permissions.default.stylesheet', 2)
-        profile.set_preference('permissions.default.image', 2)
-        profile.set_preference('dom.ipc.plugins.enabled.libflashplayer.so', 'false')
-        return profile
 
 
 class PaperSpider(Spider):
@@ -41,51 +17,66 @@ class PaperSpider(Spider):
         super(PaperSpider, self).__init__()
         self._crawled_ids = set()
         self.limit = 2000
-        self._expand_details = False
 
     def parse(self, response):
-        selector = self.get_selector(response)
         if self._url_to_id(response.url) in self._crawled_ids:
             return
         if len(self._crawled_ids) == self.limit:
             return
+        try:
+            data = self._extract_paper_data(response)
+            self._crawled_ids.add(self._url_to_id(response.url))
+            yield data
+        except Exception:
+            self.logger.error('Failed to extract info for {}'.format(response.url))
+        try:
+            ref_links = self._extract_reference_links(self.get_selector(response))
+            for ref in ref_links[:5]:
+                if len(self._crawled_ids) == self.limit:
+                    return
+                self.logger.info(ref)
+                yield response.follow(ref, callback=self.parse)
+        except Exception:
+            self.logger.error('Failed to extract ref links for {}'.format(response.url))
 
-        references = self._extract_references(selector)
-        result = {
+    def _extract_paper_data(self, response: Response):
+        selector = self.get_selector(response)
+        return {
             'type': 'paper',
             'id': self._url_to_id(response.url),
             'title': self._extract_title(selector),
             'authors': self._extract_authors(selector),
             'date': self._extract_year(selector),
             'abstract': self._extract_abstract(selector),
-            'references': [self._extract_reference_name(ref) for ref in references],
+            'references': self._references_to_ids(self._extract_reference_links(selector)),
         }
-        self._crawled_ids.add(self._url_to_id(response.url))
-        yield result
-        for ref in references[:5]:
-            self.logger.info(ref)
-            yield response.follow(ref, callback=self.parse)
 
     def _extract_title(self, selector: Selector):
-        return selector.css('[data-selenium-selector="paper-detail-title"]::text').extract_first()
+        return selector.xpath("//meta[@name='citation_title']/@content")[0].extract()
 
     def _extract_abstract(self, selector: Selector):
-        return selector.css('.abstract__text::text').extract_first()
+        return selector.xpath("//meta[@name='description']/@content")[0].extract()
 
     def _extract_authors(self, selector: Selector):
-        return selector.css(
-            '#paper-header .subhead .author-list__author-name span span::text'
-        ).extract()
+        return selector.xpath("//meta[@name='citation_author']/@content").extract()
 
     def _extract_year(self, selector: Selector):
-        return selector.css(
-            '[data-selenium-selector="paper-year"] span span::text'
-        ).extract_first()
+        return selector.xpath("//meta[@name='citation_publication_date']/@content")[0].extract()
 
-    def _extract_references(self, selector: Selector):
+    def _extract_reference_links(self, selector: Selector):
         return selector.css(
             '#references .citation .result-meta [data-selenium-selector="title-link"]::attr(href)'
         ).extract()
+
+    def _references_to_ids(self, references):
+        result = []
+        for ref in references:
+            try:
+                ref_id = self._url_to_id(ref)
+                result.append(ref_id)
+            except Exception:
+                self.logger.info('Failed to extract id for {}'.format(ref))
+        return result
 
     def _extract_reference_name(self, ref_url):
         after_paper = ref_url.split('/paper/')[1]
@@ -95,16 +86,4 @@ class PaperSpider(Spider):
         return url.split('/paper/')[1]
 
     def get_selector(self, response: Response) -> Selector:
-        if not self._expand_details:
-            return Selector(text=response.text)
-        with Firefox() as driver:
-            driver.get(response.url)
-            self._click(driver, '.abstract__text .text-truncator__toggle')
-            self._click(driver, '.more-authors-label')
-            return Selector(text=driver.page_source)
-
-    def _click(self, driver, selector: str):
-        try:
-            driver.find_element_by_css_selector(selector).click()
-        except Exception:
-            self.logger.info('Failed to find {}'.format(selector))
+        return Selector(text=response.text)
