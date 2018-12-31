@@ -11,11 +11,11 @@ def read_iterate():
     with open(root + '/crawl/crawl.json') as file:
         data = json.load(file)
         for paper in data:
-            yield {
+            paper.update({
                 '_index': 'paper_index',
                 '_type': 'paper',
-                'doc': paper
-            }
+            })
+            yield paper
 
 
 def build_index():
@@ -26,3 +26,8 @@ def build_index():
 def delete_index():
     es = Elasticsearch()
     es.indices.delete(index='paper_index', ignore=[400, 404])
+
+
+if __name__ == '__main__':
+    delete_index()
+    build_index()
